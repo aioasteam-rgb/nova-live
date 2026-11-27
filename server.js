@@ -20,7 +20,7 @@ const MODEL = env("STAGEHAND_MODEL", "google/gemini-2.5-flash");
 const MODEL_API_KEY = env("MODEL_API_KEY");
 const BROWSER_MODE = env("BROWSER_MODE", "local"); // local = Edge on this computer, browserbase = cloud
 const LOCAL_BROWSER_PATH = env("LOCAL_BROWSER_PATH", "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe");
-const MAX_WAIT_MS = Number(env("MAX_WAIT_MS", "48000")); // must stay under the Tavus tool timeout (55 s)
+const MAX_WAIT_MS = Number(env("MAX_WAIT_MS", "9000")); // must stay under the Tavus tool timeout (55 s)
 
 const PORTALS = {
   admin: { name: "Admin Portal", url: env("ADMIN_URL", "https://demoadmin.gamasuite.com/"), user: env("ADMIN_USER"), pass: env("ADMIN_PASS") },
@@ -201,6 +201,13 @@ async function chooseMode(page, mode) {
   throw new Error("mode did not switch to " + mode);
 }
 
+// AI actions: fail fast while the free model quota is used up, so Nova never waits for nothing
+async function aiAct(page, instr, ms) {
+  if (Date.now() < (state.aiOffUntil || 0)) throw new Error("AI model quota is used up for now");
+  try { return await withTimeout(page.act(instr), ms, instr); }
+  catch (e) { if (/quota|429|rate.?limit|exceeded/i.test(e.message)) state.aiOffUntil = Date.now() + 3600e3; throw e; }
+}
+
 // "open customer section", "click shipper field", "click Save", "go to Air tab" -> no AI needed
 async function directClick(page, clause) {
   const m = clause.match(/^(?:please\s+)?(?:open|click(?: on)?|go to|select|choose|focus(?: on)?|show|press|tap)\s+(?:the\s+)?(.+?)(?:\s+(?:field|section|box|dropdown|tab|list|button|option|menu))?\s*$/i);
@@ -251,6 +258,8 @@ async function runSteps(portal, instruction, data) {
     if (await page.locator('input[type="password"]').count()) { state.loggedIn[portal] = false; await openPortal(portal); await page.goto(base + "/inquiry/inquiry-view/add-request-quote", { waitUntil: "commit", timeout: 60000 }).catch(() => {}); await page.waitForTimeout(5000); }
     clauses = clauses.slice(1);
   }
+  // "open the GAMA portal", "log in", "open the live demo" are already done by openPortal
+  clauses = clauses.filter((c) => !/^(?:please\s+)?(?:open|log ?in|sign ?in|go to|show|start)\b(?:\s+(?:to|into|the|my|our|live|gama|suite|admin|portal|demo|system|website|site|login|and|log|in))*\s*$/i.test(c));
   if (data && typeof data === "object") {
     for (const [k, v] of Object.entries(data)) if (v && !clauses.some((c) => c.toLowerCase().includes(String(v).toLowerCase()))) clauses.push(`set ${k} ${v}`);
   }
@@ -271,12 +280,12 @@ async function runSteps(portal, instruction, data) {
         try { await fillField(page, field, value); }
         catch (e) {
           log("direct fill failed, trying AI: " + e.message);
-          await withTimeout(page.act(`type "${value}" into the ${field} input field`), 45000, clause);
+          await aiAct(page, `type "${value}" into the ${field} input field`, 30000);
           await page.waitForTimeout(1500);
-          try { await withTimeout(page.act(`click the suggestion "${value}" in the dropdown list that just opened`), 15000, "suggestion"); } catch {}
+          try { await aiAct(page, `click the suggestion "${value}" in the dropdown list that just opened`, 15000); } catch {}
         }
       } else if (!(await directClick(page, clause))) {
-        await withTimeout(page.act(clause), 45000, clause);
+        await aiAct(page, clause, 30000);
       }
       done.push(clause);
     } catch (e) {
@@ -298,6 +307,18 @@ async function runInstruction({ portal = "admin", instruction, data }) {
   step(`Instruction: ${instruction}`, "instruction");
   log(`run [${portal}] ${instruction} ${data ? JSON.stringify(data) : ""}`);
   try {
+    const site = instruction.match(/^(?:please\s+)?(?:open|go to|visit|show|browse)\s+(?:the\s+)?(?:website\s+|site\s+)?((?:https?:\/\/)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/\S*)?)\s*$/i);
+    if (site && !/gama/i.test(site[1])) {
+      await ensureBrowser();
+      const url = /^https?:/i.test(site[1]) ? site[1] : "https://" + site[1];
+      step("Opening " + url);
+      await state.stagehand.page.goto(url, { waitUntil: "commit", timeout: 45000 }).catch((e) => log("goto: " + e.message));
+      await state.stagehand.page.waitForTimeout(1500);
+      state.portal = null;
+      state.current.status = "done"; state.current.summary = "Opened " + url;
+      step("Done", "done");
+      return state.current;
+    }
     if (state.portal !== portal || !state.loggedIn[portal]) await openPortal(portal);
     if (state.stopRequested) throw new Error("stopped");
     const res = await runSteps(portal, instruction, data);
