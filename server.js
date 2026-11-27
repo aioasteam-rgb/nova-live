@@ -210,6 +210,7 @@ async function fillField(page, key, value) {
     if (!(await field.count()) || !(await field.isVisible().catch(() => false))) continue;
     const input = field.locator("input").first();
     await input.scrollIntoViewIfNeeded().catch(() => {});
+    await flash(input);
     await input.click();
     await input.fill("");
     await input.pressSequentially(String(value), { delay: 70 });
@@ -248,9 +249,26 @@ async function aiAct(page, instr, ms) {
   catch (e) { if (/quota|429|rate.?limit|exceeded/i.test(e.message)) state.aiOffUntil = Date.now() + 3600e3; throw e; }
 }
 
+// show the audience where Nova is about to click: orange ring + arrow for a moment
+async function flash(loc) {
+  try {
+    await loc.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const d = document.createElement("div");
+      d.style.cssText = `position:fixed;left:${r.left - 6}px;top:${r.top - 6}px;width:${r.width + 12}px;height:${r.height + 12}px;border:3px solid #ff6a00;border-radius:8px;box-shadow:0 0 0 4px rgba(255,106,0,.25);z-index:2147483647;pointer-events:none`;
+      const a = document.createElement("div");
+      a.textContent = "\u27A4";
+      a.style.cssText = `position:fixed;left:${Math.max(0, r.left - 44)}px;top:${r.top + r.height / 2 - 20}px;font-size:32px;line-height:40px;color:#ff6a00;z-index:2147483647;pointer-events:none;text-shadow:0 0 4px #fff`;
+      document.body.append(d, a);
+      setTimeout(() => { d.remove(); a.remove(); }, 2200);
+    });
+    await new Promise((r) => setTimeout(r, 700));
+  } catch {}
+}
+
 // "open customer section", "click shipper field", "click Save", "go to Air tab" -> no AI needed
 async function directClick(page, clause) {
-  const m = clause.match(/^(?:please\s+)?(?:open|click(?: on)?|go to|select|choose|focus(?: on)?|show|press|tap)\s+(?:the\s+)?(.+?)(?:\s+(?:field|section|box|dropdown|tab|list|button|option|menu))?\s*$/i);
+  const m = clause.match(/^(?:please\s+)?(?:open|click(?: on)?|go to|select|choose|focus(?: on)?|show|press|tap)\s+(?:the\s+)?(.+?)(?:\s+(?:field|section|box|dropdown|tab|list|button|option|menu|module|page|screen|link|icon))?\s*$/i);
   if (!m) return false;
   const name = m[1].trim();
   const key = name.toLowerCase();
@@ -260,6 +278,7 @@ async function directClick(page, clause) {
       if (!(await field.count()) || !(await field.isVisible().catch(() => false))) continue;
       const input = field.locator("input, mat-select, textarea").first();
       await input.scrollIntoViewIfNeeded().catch(() => {});
+      await flash(input);
       await input.click();
       await page.waitForTimeout(800);
       return true;
@@ -278,6 +297,7 @@ async function directClick(page, clause) {
     const el = c.first();
     if ((await el.count().catch(() => 0)) && (await el.isVisible().catch(() => false))) {
       await el.scrollIntoViewIfNeeded().catch(() => {});
+      await flash(el);
       await el.click({ timeout: 8000 });
       await page.waitForTimeout(1200);
       return true;
