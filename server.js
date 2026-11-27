@@ -188,10 +188,17 @@ async function fillField(page, key, value) {
   throw new Error("field not found: " + key);
 }
 async function chooseMode(page, mode) {
+  await page.locator("div.mode").first().waitFor({ state: "visible", timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(1500);
   const m = page.locator("div.mode").filter({ hasText: new RegExp("^\\s*" + esc(mode) + "\\s*$", "i") }).first();
   if (!(await m.count())) throw new Error("mode not found: " + mode);
-  await m.click();
-  await page.waitForTimeout(1200);
+  for (let i = 0; i < 4; i++) {
+    await m.click();
+    await page.waitForTimeout(1500);
+    const active = await page.locator("div.mode.active").first().innerText().catch(() => "");
+    if (active.trim().toLowerCase() === mode.toLowerCase()) return;
+  }
+  throw new Error("mode did not switch to " + mode);
 }
 
 async function runSteps(portal, instruction, data) {
