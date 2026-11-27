@@ -56,6 +56,7 @@ async function ensureBrowser() {
   log("starting cloud browser");
   const sh = new Stagehand({
     env: "BROWSERBASE",
+    useAPI: false,
     apiKey: BB_API_KEY,
     projectId: BB_PROJECT_ID,
     modelName: MODEL,
@@ -97,10 +98,16 @@ async function openPortal(key) {
   const hasPassword = await page.locator('input[type="password"]').count();
   if (hasPassword && p.user && p.pass) {
     step(`Logging in to the ${p.name}`);
-    await page.act({ action: "type %username% into the username or email field", variables: { username: p.user } });
-    await page.act({ action: "type %password% into the password field", variables: { password: p.pass } });
-    await page.act("click the login or sign in button");
-    await page.waitForTimeout(4000);
+    const userBox = page.locator('input[type="email"], input[type="text"], input[name*="user" i], input[id*="user" i]').first();
+    await userBox.fill(p.user);
+    await page.locator('input[type="password"]').first().fill(p.pass);
+    await page.locator('input[type="password"]').first().press("Enter");
+    await page.waitForTimeout(5000);
+    if (await page.locator('input[type="password"]').count()) {
+      const btn = page.locator('button[type="submit"], button:has-text("Login"), button:has-text("Sign in"), input[type="submit"]').first();
+      if (await btn.count()) { await btn.click(); await page.waitForTimeout(5000); }
+    }
+    step(`Logged in to the ${p.name}`);
   }
   state.loggedIn[key] = true;
   state.portal = key;
@@ -320,9 +327,9 @@ app.post("/setup", requireAdmin, async (req, res) => {
   }
 });
 
-app.use(express.static(new URL("./public", import.meta.url).pathname));
+app.use(express.static("public"));
 app.get("/", (req, res) => res.redirect("/console.html"));
-app.get("/workspace", (req, res) => res.sendFile(new URL("./public/workspace.html", import.meta.url).pathname));
+app.get("/workspace", (req, res) => res.sendFile("workspace.html", { root: "public" }));
 app.get("/health", (req, res) => res.json({ ok: true, browser: !!state.stagehand, busy: state.busy }));
 
 app.listen(PORT, () => log(`Nova Live Operator listening on ${PORT}`));
