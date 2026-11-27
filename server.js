@@ -18,6 +18,8 @@ const BB_API_KEY = env("BROWSERBASE_API_KEY");
 const BB_PROJECT_ID = env("BROWSERBASE_PROJECT_ID");
 const MODEL = env("STAGEHAND_MODEL", "google/gemini-2.5-flash");
 const MODEL_API_KEY = env("MODEL_API_KEY");
+const BROWSER_MODE = env("BROWSER_MODE", "local"); // local = Edge on this computer, browserbase = cloud
+const LOCAL_BROWSER_PATH = env("LOCAL_BROWSER_PATH", "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe");
 const MAX_WAIT_MS = Number(env("MAX_WAIT_MS", "48000")); // must stay under the Tavus tool timeout (55 s)
 
 const PORTALS = {
@@ -54,7 +56,14 @@ const step = (text, kind = "doing") => {
 async function ensureBrowser() {
   if (state.stagehand) return state.stagehand;
   log("starting cloud browser");
-  const sh = new Stagehand({
+  const local = BROWSER_MODE === "local";
+  const sh = new Stagehand(local ? {
+    env: "LOCAL",
+    modelName: MODEL,
+    modelClientOptions: { apiKey: MODEL_API_KEY },
+    verbose: 1,
+    localBrowserLaunchOptions: { headless: false, executablePath: LOCAL_BROWSER_PATH, viewport: { width: 1440, height: 860 } },
+  } : {
     env: "BROWSERBASE",
     useAPI: false,
     apiKey: BB_API_KEY,
@@ -62,26 +71,26 @@ async function ensureBrowser() {
     modelName: MODEL,
     modelClientOptions: { apiKey: MODEL_API_KEY },
     verbose: 1,
-    logger: (l) => {
-      const msg = l?.message || "";
-      if (/act|click|fill|type|navigat|select/i.test(msg)) step(msg.slice(0, 120), "detail");
-    },
     browserbaseSessionCreateParams: {
       projectId: BB_PROJECT_ID,
-      keepAlive: true,
-      timeout: 3600,
+      timeout: 1800,
       browserSettings: { viewport: { width: 1440, height: 860 } },
     },
   });
   await sh.init();
   state.stagehand = sh;
-  state.sessionId = sh.browserbaseSessionID;
-  try {
-    const bb = new Browserbase({ apiKey: BB_API_KEY });
-    const dbg = await bb.sessions.debug(state.sessionId);
-    state.liveViewUrl = dbg.debuggerFullscreenUrl;
-  } catch (e) {
-    log("live view url error: " + e.message);
+  if (local) {
+    state.sessionId = "local";
+    state.liveViewUrl = "/live";
+  } else {
+    state.sessionId = sh.browserbaseSessionID;
+    try {
+      const bb = new Browserbase({ apiKey: BB_API_KEY });
+      const dbg = await bb.sessions.debug(state.sessionId);
+      state.liveViewUrl = dbg.debuggerFullscreenUrl;
+    } catch (e) {
+      log("live view url error: " + e.message);
+    }
   }
   log("browser ready, session " + state.sessionId);
   return sh;
@@ -368,6 +377,24 @@ app.post("/setup", requireAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+
+// Live picture of the local browser (used when BROWSER_MODE=local)
+let lastShot = null, lastShotAt = 0, shotBusy = null;
+app.get("/v1/workspace/shot", async (req, res) => {
+  try {
+    const page = state.stagehand?.page;
+    if (!page) return res.status(204).end();
+    if (Date.now() - lastShotAt > 350) {
+      if (!shotBusy) shotBusy = page.screenshot({ type: "jpeg", quality: 70 }).then((b) => { lastShot = b; lastShotAt = Date.now(); }).finally(() => { shotBusy = null; });
+      await shotBusy;
+    }
+    res.set("Cache-Control", "no-store").type("image/jpeg").send(lastShot);
+  } catch (e) { res.status(204).end(); }
+});
+app.get("/live", (req, res) => res.type("html").send(`<!doctype html><html><body style="margin:0;background:#0b1530;display:flex;align-items:center;justify-content:center;height:100vh;overflow:hidden">
+<img id="s" style="max-width:100%;max-height:100%;object-fit:contain">
+<script>const i=document.getElementById("s");function n(){const t=new Image();t.onload=()=>{i.src=t.src;setTimeout(n,250)};t.onerror=()=>setTimeout(n,800);t.src="/v1/workspace/shot?"+Date.now()}n();</script></body></html>`));
 
 app.use(express.static("public"));
 app.get("/", (req, res) => res.redirect("/console.html"));
