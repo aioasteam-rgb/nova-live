@@ -216,6 +216,9 @@ async function runSteps(portal, instruction, data) {
   if (data && typeof data === "object") {
     for (const [k, v] of Object.entries(data)) if (v && !clauses.some((c) => c.toLowerCase().includes(String(v).toLowerCase()))) clauses.push(`set ${k} ${v}`);
   }
+  // GAMA applies the customer's default mode when a customer is picked, so pick the customer first, then the mode
+  const rank = (c) => (/\bcustomer\b/i.test(c) ? 0 : /\b(sea|air|land|express|vas)\b/i.test(c) && /^(choose|select|pick|click|switch|set mode|sea|air|land|express|vas)/i.test(c) ? 1 : 2);
+  clauses.sort((a, b) => rank(a) - rank(b));
   const done = [];
   for (const clause of clauses) {
     if (state.stopRequested) break;
