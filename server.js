@@ -104,14 +104,29 @@ async function ensureBrowser() {
   return sh;
 }
 
-// the browser may already be on the portal and logged in (for example after a slow login)
-async function alreadyIn(key) {
+// What the portal page shows right now: "login" (login form), "in" (logged-in app) or "loading" (spinner / blank)
+async function portalState(key) {
   try {
     const page = state.stagehand?.page;
-    if (!page) return false;
-    if (!page.url().startsWith(new URL(PORTALS[key].url).origin)) return false;
-    return await page.evaluate(() => ![...document.querySelectorAll('input[type="password"]')].some((e) => e.offsetParent !== null) && (document.body.innerText || "").length > 200);
-  } catch { return false; }
+    if (!page) return "away";
+    if (!page.url().startsWith(new URL(PORTALS[key].url).origin)) return "away";
+    return await page.evaluate(() => {
+      const pw = [...document.querySelectorAll('input[type="password"]')].some((e) => e.offsetParent !== null);
+      if (pw) return "login";
+      const t = document.body ? document.body.innerText || "" : "";
+      return /Setups|Inquiry|Financials|Booking Utilization|Warehouse/i.test(t) ? "in" : "loading";
+    });
+  } catch { return "loading"; }
+}
+async function waitPortal(key, ms, want) {
+  const end = Date.now() + ms;
+  let st = "loading";
+  while (Date.now() < end) {
+    st = await portalState(key);
+    if (want ? st === want : st === "login" || st === "in") return st;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return st;
 }
 
 async function openPortal(key) {
@@ -120,12 +135,19 @@ async function openPortal(key) {
   const sh = await ensureBrowser();
   const page = sh.page;
   step(`Opening the ${p.name}`);
-  try { await page.goto(p.url, { waitUntil: "commit", timeout: 60000 }); } catch (e) { log("goto slow: " + e.message); }
-  // wait until the app shows either the login form or the logged-in shell
-  await page.waitForSelector('input[type="password"], aside, nav, .sidebar, [class*="sidebar"]', { timeout: 60000 }).catch(() => {});
-  await page.waitForTimeout(1500);
-  const hasPassword = await page.locator('input[type="password"]').count();
-  if (hasPassword && p.user && p.pass) {
+  state.loggedIn[key] = false;
+  let st = "loading";
+  // GAMA sometimes hangs on its loading spinner: reload until the login form or the app shows
+  for (let attempt = 0; attempt < 3 && st !== "login" && st !== "in"; attempt++) {
+    try {
+      if (attempt === 0) await page.goto(p.url, { waitUntil: "commit", timeout: 45000 });
+      else { log("portal stuck on loading, reloading"); await page.reload({ waitUntil: "commit", timeout: 45000 }); }
+    } catch (e) { log("goto slow: " + e.message); }
+    st = await waitPortal(key, 30000);
+    if (state.stopRequested) throw new Error("stopped");
+  }
+  if (st === "login") {
+    if (!p.user || !p.pass) throw new Error("the login form is showing but no user or password is set");
     step(`Logging in to the ${p.name}`);
     const userBox = page.locator('input[type="email"], input[type="text"], input[name*="user" i], input[id*="user" i]').first();
     await userBox.click();
@@ -135,12 +157,12 @@ async function openPortal(key) {
     await pw.fill(p.pass);
     const btn = page.locator('button[type="submit"], button:has-text("Login"), button:has-text("Log in"), button:has-text("Sign in"), input[type="submit"]').first();
     if (await btn.count()) await btn.click(); else await pw.press("Enter");
-    // wait for the password box to disappear (= logged in)
-    const ok = await page.waitForFunction(() => ![...document.querySelectorAll('input[type="password"]')].some((e) => e.offsetParent !== null) || /Booking Utilization|Dashboard|Inquiry/i.test(document.body.innerText || ""), null, { timeout: 45000 }).then(() => true).catch(() => false);
-    if (!ok) throw new Error("login did not finish, the login form is still showing");
-    await page.waitForTimeout(3000);
+    st = await waitPortal(key, 60000, "in");
+    if (st !== "in") throw new Error("login did not finish, the portal is still showing the " + (st === "login" ? "login form" : "loading screen"));
+    await page.waitForTimeout(1500);
     step(`Logged in to the ${p.name}`);
   }
+  if (st !== "in") throw new Error("the portal did not load, it is stuck on the loading screen");
   state.loggedIn[key] = true;
   state.portal = key;
 }
@@ -314,7 +336,7 @@ async function runSteps(portal, instruction, data) {
   }
   let msg = done.length ? "Done: " + done.join("; ") + "." : "";
   if (failed.length) msg += " Could not do: " + failed.join("; ") + ". Tell the user in one friendly sentence and ask them to say it more specifically, for example which field or button to click.";
-  return { message: msg.trim() || "Nothing to do." };
+  return { message: msg.trim() || "The GAMA portal is open and logged in, the dashboard is showing. Ask what they would like to see." };
 }
 
 async function runInstruction({ portal = "admin", instruction, data }) {
@@ -337,8 +359,12 @@ async function runInstruction({ portal = "admin", instruction, data }) {
       step("Done", "done");
       return state.current;
     }
-    if ((state.portal !== portal || !state.loggedIn[portal]) && (await alreadyIn(portal))) { state.loggedIn[portal] = true; state.portal = portal; }
-    if (state.portal !== portal || !state.loggedIn[portal]) await openPortal(portal);
+    // never trust the flag: look at the real page before every instruction
+    await ensureBrowser();
+    let st = await portalState(portal);
+    if (st === "loading") st = await waitPortal(portal, 8000);
+    if (st === "in") { state.loggedIn[portal] = true; state.portal = portal; }
+    else await openPortal(portal);
     if (state.stopRequested) throw new Error("stopped");
     const res = await runSteps(portal, instruction, data);
     const msg = (res && (res.message || res.completed)) ? String(res.message || "Done") : "Done";
