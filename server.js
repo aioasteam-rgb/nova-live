@@ -96,6 +96,16 @@ async function ensureBrowser() {
   return sh;
 }
 
+// the browser may already be on the portal and logged in (for example after a slow login)
+async function alreadyIn(key) {
+  try {
+    const page = state.stagehand?.page;
+    if (!page) return false;
+    if (!page.url().startsWith(new URL(PORTALS[key].url).origin)) return false;
+    return await page.evaluate(() => ![...document.querySelectorAll('input[type="password"]')].some((e) => e.offsetParent !== null) && (document.body.innerText || "").length > 200);
+  } catch { return false; }
+}
+
 async function openPortal(key) {
   const p = PORTALS[key];
   if (!p) throw new Error("unknown portal " + key);
@@ -118,7 +128,7 @@ async function openPortal(key) {
     const btn = page.locator('button[type="submit"], button:has-text("Login"), button:has-text("Log in"), button:has-text("Sign in"), input[type="submit"]').first();
     if (await btn.count()) await btn.click(); else await pw.press("Enter");
     // wait for the password box to disappear (= logged in)
-    const ok = await page.waitForFunction(() => !document.querySelector('input[type="password"]'), null, { timeout: 45000 }).then(() => true).catch(() => false);
+    const ok = await page.waitForFunction(() => ![...document.querySelectorAll('input[type="password"]')].some((e) => e.offsetParent !== null) || /Booking Utilization|Dashboard|Inquiry/i.test(document.body.innerText || ""), null, { timeout: 45000 }).then(() => true).catch(() => false);
     if (!ok) throw new Error("login did not finish, the login form is still showing");
     await page.waitForTimeout(3000);
     step(`Logged in to the ${p.name}`);
@@ -319,6 +329,7 @@ async function runInstruction({ portal = "admin", instruction, data }) {
       step("Done", "done");
       return state.current;
     }
+    if ((state.portal !== portal || !state.loggedIn[portal]) && (await alreadyIn(portal))) { state.loggedIn[portal] = true; state.portal = portal; }
     if (state.portal !== portal || !state.loggedIn[portal]) await openPortal(portal);
     if (state.stopRequested) throw new Error("stopped");
     const res = await runSteps(portal, instruction, data);
