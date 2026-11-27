@@ -102,20 +102,25 @@ async function openPortal(key) {
   const sh = await ensureBrowser();
   const page = sh.page;
   step(`Opening the ${p.name}`);
-  await page.goto(p.url, { waitUntil: "domcontentloaded", timeout: 45000 });
-  await page.waitForTimeout(2500);
+  try { await page.goto(p.url, { waitUntil: "commit", timeout: 60000 }); } catch (e) { log("goto slow: " + e.message); }
+  // wait until the app shows either the login form or the logged-in shell
+  await page.waitForSelector('input[type="password"], aside, nav, .sidebar, [class*="sidebar"]', { timeout: 60000 }).catch(() => {});
+  await page.waitForTimeout(1500);
   const hasPassword = await page.locator('input[type="password"]').count();
   if (hasPassword && p.user && p.pass) {
     step(`Logging in to the ${p.name}`);
     const userBox = page.locator('input[type="email"], input[type="text"], input[name*="user" i], input[id*="user" i]').first();
+    await userBox.click();
     await userBox.fill(p.user);
-    await page.locator('input[type="password"]').first().fill(p.pass);
-    await page.locator('input[type="password"]').first().press("Enter");
-    await page.waitForTimeout(5000);
-    if (await page.locator('input[type="password"]').count()) {
-      const btn = page.locator('button[type="submit"], button:has-text("Login"), button:has-text("Sign in"), input[type="submit"]').first();
-      if (await btn.count()) { await btn.click(); await page.waitForTimeout(5000); }
-    }
+    const pw = page.locator('input[type="password"]').first();
+    await pw.click();
+    await pw.fill(p.pass);
+    const btn = page.locator('button[type="submit"], button:has-text("Login"), button:has-text("Log in"), button:has-text("Sign in"), input[type="submit"]').first();
+    if (await btn.count()) await btn.click(); else await pw.press("Enter");
+    // wait for the password box to disappear (= logged in)
+    const ok = await page.waitForFunction(() => !document.querySelector('input[type="password"]'), null, { timeout: 45000 }).then(() => true).catch(() => false);
+    if (!ok) throw new Error("login did not finish, the login form is still showing");
+    await page.waitForTimeout(3000);
     step(`Logged in to the ${p.name}`);
   }
   state.loggedIn[key] = true;
@@ -143,8 +148,10 @@ async function runSteps(portal, instruction, data) {
   let clauses = instruction.split(/,|;|\band then\b|\bthen\b/i).map((c) => c.trim()).filter(Boolean);
   if (portal === "admin" && /quote|inquir/i.test(clauses[0] || "") && /open|create|new|go to|start/i.test(clauses[0])) {
     step("Opening Request Freight Quote");
-    await page.goto(base + "/inquiry/inquiry-view/add-request-quote", { waitUntil: "domcontentloaded", timeout: 45000 });
-    await page.waitForTimeout(3000);
+    try { await page.goto(base + "/inquiry/inquiry-view/add-request-quote", { waitUntil: "commit", timeout: 60000 }); } catch (e) { log("goto slow: " + e.message); }
+    await page.waitForSelector("input, form", { timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(4000);
+    if (await page.locator('input[type="password"]').count()) { state.loggedIn[portal] = false; await openPortal(portal); await page.goto(base + "/inquiry/inquiry-view/add-request-quote", { waitUntil: "commit", timeout: 60000 }).catch(() => {}); await page.waitForTimeout(5000); }
     clauses = clauses.slice(1);
   }
   if (data && typeof data === "object") {
@@ -158,14 +165,14 @@ async function runSteps(portal, instruction, data) {
     try {
       if (m) {
         const field = m[1], value = m[2].replace(/^["']|["']$/g, "");
-        await withTimeout(page.act(`type "${value}" into the ${field} input field`), 30000, clause);
+        await withTimeout(page.act(`type "${value}" into the ${field} input field`), 45000, clause);
         await page.waitForTimeout(1500);
         try { await withTimeout(page.act(`click the suggestion "${value}" in the dropdown list that just opened`), 15000, "suggestion"); } catch {}
       } else if (/^(choose|select|pick|click)\s+(.+)$/i.test(clause)) {
         const what = clause.replace(/^(choose|select|pick|click)\s+/i, "");
-        await withTimeout(page.act(`click the "${what}" option or tab`), 30000, clause);
+        await withTimeout(page.act(`click the "${what}" option or tab`), 45000, clause);
       } else {
-        await withTimeout(page.act(clause), 30000, clause);
+        await withTimeout(page.act(clause), 45000, clause);
       }
       done.push(clause);
     } catch (e) {
