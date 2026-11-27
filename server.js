@@ -201,6 +201,44 @@ async function chooseMode(page, mode) {
   throw new Error("mode did not switch to " + mode);
 }
 
+// "open customer section", "click shipper field", "click Save", "go to Air tab" -> no AI needed
+async function directClick(page, clause) {
+  const m = clause.match(/^(?:please\s+)?(?:open|click(?: on)?|go to|select|choose|focus(?: on)?|show|press|tap)\s+(?:the\s+)?(.+?)(?:\s+(?:field|section|box|dropdown|tab|list|button|option|menu))?\s*$/i);
+  if (!m) return false;
+  const name = m[1].trim();
+  const key = name.toLowerCase();
+  if (FIELD_LABELS[key]) {
+    for (const label of FIELD_LABELS[key]) {
+      const field = page.locator("mat-form-field").filter({ has: page.locator("mat-label, label", { hasText: new RegExp("^\\s*" + esc(label) + "\\s*\\*?\\s*$", "i") }) }).first();
+      if (!(await field.count()) || !(await field.isVisible().catch(() => false))) continue;
+      const input = field.locator("input, mat-select, textarea").first();
+      await input.scrollIntoViewIfNeeded().catch(() => {});
+      await input.click();
+      await page.waitForTimeout(800);
+      return true;
+    }
+  }
+  const rx = new RegExp("^\\s*" + esc(name) + "\\s*$", "i");
+  const candidates = [
+    page.getByRole("button", { name: rx }),
+    page.getByRole("tab", { name: rx }),
+    page.getByRole("link", { name: rx }),
+    page.getByRole("menuitem", { name: rx }),
+    page.locator("div.mode, mat-option, span, a, button, li").filter({ hasText: rx }),
+    page.getByText(name, { exact: false }),
+  ];
+  for (const c of candidates) {
+    const el = c.first();
+    if ((await el.count().catch(() => 0)) && (await el.isVisible().catch(() => false))) {
+      await el.scrollIntoViewIfNeeded().catch(() => {});
+      await el.click({ timeout: 8000 });
+      await page.waitForTimeout(1200);
+      return true;
+    }
+  }
+  return false;
+}
+
 async function runSteps(portal, instruction, data) {
   const page = state.stagehand.page;
   const base = new URL(PORTALS[portal].url).origin;
@@ -219,7 +257,7 @@ async function runSteps(portal, instruction, data) {
   // GAMA applies the customer's default mode when a customer is picked, so pick the customer first, then the mode
   const rank = (c) => (/\bcustomer\b/i.test(c) ? 0 : /\b(sea|air|land|express|vas)\b/i.test(c) && /^(choose|select|pick|click|switch|set mode|sea|air|land|express|vas)/i.test(c) ? 1 : 2);
   clauses.sort((a, b) => rank(a) - rank(b));
-  const done = [];
+  const done = [], failed = [];
   for (const clause of clauses) {
     if (state.stopRequested) break;
     step(clause);
@@ -237,16 +275,19 @@ async function runSteps(portal, instruction, data) {
           await page.waitForTimeout(1500);
           try { await withTimeout(page.act(`click the suggestion "${value}" in the dropdown list that just opened`), 15000, "suggestion"); } catch {}
         }
-      } else {
+      } else if (!(await directClick(page, clause))) {
         await withTimeout(page.act(clause), 45000, clause);
       }
       done.push(clause);
     } catch (e) {
+      failed.push(clause);
       step("Could not do: " + clause, "error");
       log("step failed: " + clause + " :: " + e.message);
     }
   }
-  return { message: done.length ? "Done: " + done.join("; ") : "I could not complete the steps." };
+  let msg = done.length ? "Done: " + done.join("; ") + "." : "";
+  if (failed.length) msg += " Could not do: " + failed.join("; ") + ". Tell the user in one friendly sentence and ask them to say it more specifically, for example which field or button to click.";
+  return { message: msg.trim() || "Nothing to do." };
 }
 
 async function runInstruction({ portal = "admin", instruction, data }) {
