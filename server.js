@@ -54,7 +54,15 @@ const step = (text, kind = "doing") => {
 
 // ---------------- browser ----------------
 async function ensureBrowser() {
-  if (state.stagehand) return state.stagehand;
+  if (state.stagehand) {
+    // if the browser window was closed, start a fresh one
+    let alive = false;
+    try { alive = !state.stagehand.page.isClosed() && (await state.stagehand.page.evaluate(() => 1)) === 1; } catch {}
+    if (alive) return state.stagehand;
+    log("browser was closed, starting a new one");
+    try { await state.stagehand.close(); } catch {}
+    Object.assign(state, { stagehand: null, sessionId: null, loggedIn: {}, portal: null });
+  }
   log("starting cloud browser");
   const local = BROWSER_MODE === "local";
   const sh = new Stagehand(local ? {
@@ -269,7 +277,7 @@ async function runSteps(portal, instruction, data) {
     clauses = clauses.slice(1);
   }
   // "open the GAMA portal", "log in", "open the live demo" are already done by openPortal
-  clauses = clauses.filter((c) => !/^(?:please\s+)?(?:open|log ?in|sign ?in|go to|show|start)\b(?:\s+(?:to|into|the|my|our|live|gama|suite|admin|portal|demo|system|website|site|login|and|log|in))*\s*$/i.test(c));
+  clauses = clauses.filter((c) => !/^(?:please\s+)?(?:open|log ?in|sign ?in|go to|show|start)\b(?:\s+(?:to|into|the|my|our|live|gama|suite|admin|portal|demo|system|website|site|login|and|log|in|dashboard|data|home|main|page|screen|app|application|software))*\s*$/i.test(c));
   if (data && typeof data === "object") {
     for (const [k, v] of Object.entries(data)) if (v && !clauses.some((c) => c.toLowerCase().includes(String(v).toLowerCase()))) clauses.push(`set ${k} ${v}`);
   }
@@ -338,6 +346,17 @@ async function runInstruction({ portal = "admin", instruction, data }) {
     state.current.summary = msg.slice(0, 400);
     step(state.current.status === "done" ? "Done" : "Stopped", state.current.status);
   } catch (e) {
+    if (!state.retried && /closed|Target page|has been closed|disconnected/i.test(e.message) && !state.stopRequested) {
+      state.retried = true;
+      log("browser closed during the action, retrying once");
+      try { await state.stagehand?.close(); } catch {}
+      Object.assign(state, { stagehand: null, sessionId: null, loggedIn: {}, portal: null });
+      state.busy = false;
+      const again = await runInstruction({ portal, instruction, data });
+      state.retried = false;
+      return again;
+    }
+    state.retried = false;
     state.current.status = state.stopRequested ? "stopped" : "error";
     state.current.summary = state.stopRequested ? "Stopped as requested." : "I could not finish: " + e.message.slice(0, 200);
     step(state.current.summary, state.current.status);
