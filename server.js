@@ -124,6 +124,49 @@ function agentInstruction(portalKey, instruction, data) {
   ].join("\n");
 }
 
+
+const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + " timed out")), ms))]);
+const FIELD_RE = /^(?:set|enter|type|put|select|choose|pick)?\s*(?:the\s+)?(customer|shipper|consignee|origin|destination|port of loading|port of discharge|pol|pod|commodity|cargo|weight|volume|incoterms?|container(?: type)?|date|ready date)\s*(?:to|is|as|=|:)?\s+(.+)$/i;
+
+async function runSteps(portal, instruction, data) {
+  const page = state.stagehand.page;
+  const base = new URL(PORTALS[portal].url).origin;
+  let clauses = instruction.split(/,|;|\band then\b|\bthen\b/i).map((c) => c.trim()).filter(Boolean);
+  if (portal === "admin" && /quote|inquir/i.test(clauses[0] || "") && /open|create|new|go to|start/i.test(clauses[0])) {
+    step("Opening Request Freight Quote");
+    await page.goto(base + "/inquiry/inquiry-view/add-request-quote", { waitUntil: "domcontentloaded", timeout: 45000 });
+    await page.waitForTimeout(3000);
+    clauses = clauses.slice(1);
+  }
+  if (data && typeof data === "object") {
+    for (const [k, v] of Object.entries(data)) if (v && !clauses.some((c) => c.toLowerCase().includes(String(v).toLowerCase()))) clauses.push(`set ${k} ${v}`);
+  }
+  const done = [];
+  for (const clause of clauses) {
+    if (state.stopRequested) break;
+    step(clause);
+    const m = clause.match(FIELD_RE);
+    try {
+      if (m) {
+        const field = m[1], value = m[2].replace(/^["']|["']$/g, "");
+        await withTimeout(page.act(`type "${value}" into the ${field} input field`), 30000, clause);
+        await page.waitForTimeout(1500);
+        try { await withTimeout(page.act(`click the suggestion "${value}" in the dropdown list that just opened`), 15000, "suggestion"); } catch {}
+      } else if (/^(choose|select|pick|click)\s+(.+)$/i.test(clause)) {
+        const what = clause.replace(/^(choose|select|pick|click)\s+/i, "");
+        await withTimeout(page.act(`click the "${what}" option or tab`), 30000, clause);
+      } else {
+        await withTimeout(page.act(clause), 30000, clause);
+      }
+      done.push(clause);
+    } catch (e) {
+      step("Could not do: " + clause, "error");
+      log("step failed: " + clause + " :: " + e.message);
+    }
+  }
+  return { message: done.length ? "Done: " + done.join("; ") : "I could not complete the steps." };
+}
+
 async function runInstruction({ portal = "admin", instruction, data }) {
   const id = crypto.randomUUID();
   state.busy = true;
@@ -134,8 +177,7 @@ async function runInstruction({ portal = "admin", instruction, data }) {
   try {
     if (state.portal !== portal || !state.loggedIn[portal]) await openPortal(portal);
     if (state.stopRequested) throw new Error("stopped");
-    const agent = state.stagehand.agent();
-    const res = await agent.execute({ instruction: agentInstruction(portal, instruction, data), maxSteps: 20 });
+    const res = await runSteps(portal, instruction, data);
     const msg = (res && (res.message || res.completed)) ? String(res.message || "Done") : "Done";
     state.current.status = state.stopRequested ? "stopped" : "done";
     state.current.summary = msg.slice(0, 400);
