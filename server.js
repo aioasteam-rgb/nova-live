@@ -142,6 +142,58 @@ function agentInstruction(portalKey, instruction, data) {
 const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + " timed out")), ms))]);
 const FIELD_RE = /^(?:set|enter|type|put|select|choose|pick)?\s*(?:the\s+)?(customer|shipper|consignee|origin|destination|port of loading|port of discharge|pol|pod|commodity|cargo|weight|volume|incoterms?|container(?: type)?|date|ready date)\s*(?:to|is|as|=|:)?\s+(.+)$/i;
 
+
+// ---------- direct form filling (no AI needed for known GAMA fields) ----------
+const FIELD_LABELS = {
+  customer: ["Customer"],
+  shipper: ["Shipper"],
+  consignee: ["Consignee"],
+  origin: ["Port of Loading", "Origin Airport", "Origin"],
+  "port of loading": ["Port of Loading"],
+  pol: ["Port of Loading"],
+  destination: ["Port of Discharge", "Destination Airport", "Destination"],
+  "port of discharge": ["Port of Discharge"],
+  pod: ["Port of Discharge"],
+  commodity: ["Commodity Name"],
+  cargo: ["Commodity Name"],
+  incoterm: ["Inco Terms"],
+  incoterms: ["Inco Terms"],
+  "sales rep": ["Sales Rep"],
+  reference: ["Reference #"],
+  "contact person": ["Contact Person"],
+};
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+async function fillField(page, key, value) {
+  const labels = FIELD_LABELS[key.toLowerCase()] || [key];
+  for (const label of labels) {
+    const field = page.locator("mat-form-field").filter({ has: page.locator("mat-label, label", { hasText: new RegExp("^\\s*" + esc(label) + "\\s*\\*?\\s*$", "i") }) }).first();
+    if (!(await field.count()) || !(await field.isVisible().catch(() => false))) continue;
+    const input = field.locator("input").first();
+    await input.scrollIntoViewIfNeeded().catch(() => {});
+    await input.click();
+    await input.fill("");
+    await input.pressSequentially(String(value), { delay: 70 });
+    const appeared = await page.locator("mat-option").first().waitFor({ state: "visible", timeout: 7000 }).then(() => true).catch(() => false);
+    if (appeared) {
+      const opts = page.locator("mat-option");
+      const n = await opts.count();
+      let pick = 0;
+      for (let i = 0; i < n; i++) { const t = (await opts.nth(i).innerText()).toUpperCase(); if (t.includes(String(value).toUpperCase())) { pick = i; break; } }
+      await page.waitForTimeout(300);
+      await opts.nth(pick).click();
+    }
+    await page.waitForTimeout(500);
+    return label;
+  }
+  throw new Error("field not found: " + key);
+}
+async function chooseMode(page, mode) {
+  const m = page.locator("div.mode").filter({ hasText: new RegExp("^\\s*" + esc(mode) + "\\s*$", "i") }).first();
+  if (!(await m.count())) throw new Error("mode not found: " + mode);
+  await m.click();
+  await page.waitForTimeout(1200);
+}
+
 async function runSteps(portal, instruction, data) {
   const page = state.stagehand.page;
   const base = new URL(PORTALS[portal].url).origin;
@@ -163,14 +215,18 @@ async function runSteps(portal, instruction, data) {
     step(clause);
     const m = clause.match(FIELD_RE);
     try {
-      if (m) {
+      const modeM = clause.match(/^(?:choose|select|pick|click|switch to|set mode(?: to)?)\s+(sea|air|land|express|vas)\b/i) || clause.match(/^(sea|air|land|express|vas)(?: mode| freight)?$/i);
+      if (modeM) {
+        await chooseMode(page, modeM[1]);
+      } else if (m) {
         const field = m[1], value = m[2].replace(/^["']|["']$/g, "");
-        await withTimeout(page.act(`type "${value}" into the ${field} input field`), 45000, clause);
-        await page.waitForTimeout(1500);
-        try { await withTimeout(page.act(`click the suggestion "${value}" in the dropdown list that just opened`), 15000, "suggestion"); } catch {}
-      } else if (/^(choose|select|pick|click)\s+(.+)$/i.test(clause)) {
-        const what = clause.replace(/^(choose|select|pick|click)\s+/i, "");
-        await withTimeout(page.act(`click the "${what}" option or tab`), 45000, clause);
+        try { await fillField(page, field, value); }
+        catch (e) {
+          log("direct fill failed, trying AI: " + e.message);
+          await withTimeout(page.act(`type "${value}" into the ${field} input field`), 45000, clause);
+          await page.waitForTimeout(1500);
+          try { await withTimeout(page.act(`click the suggestion "${value}" in the dropdown list that just opened`), 15000, "suggestion"); } catch {}
+        }
       } else {
         await withTimeout(page.act(clause), 45000, clause);
       }
